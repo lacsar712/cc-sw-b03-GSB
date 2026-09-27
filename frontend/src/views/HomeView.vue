@@ -55,7 +55,7 @@ onUnmounted(() => clearInterval(timer))
     <table border="1" cellpadding="6" style="border-collapse:collapse; width:100%;">
       <thead>
         <tr>
-          <th>编号</th><th>灯种</th><th>标称</th><th>实测</th><th>状态</th><th>结论</th><th>理由</th>
+          <th>编号</th><th>灯种</th><th>标称</th><th>实测</th><th>状态</th><th>结论</th><th>理由</th><th>复议次数</th>
         </tr>
       </thead>
       <tbody>
@@ -72,6 +72,7 @@ onUnmounted(() => clearInterval(timer))
           <td>{{ j.status }}</td>
           <td>{{ j.verdict }}</td>
           <td>{{ j.reason }}</td>
+          <td>{{ j.review_count }}</td>
         </tr>
       </tbody>
     </table>

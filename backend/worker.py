@@ -31,6 +31,15 @@ def claim_one(conn):
         "UPDATE jobs SET status='done', verdict=%s, reason=%s WHERE id=%s",
         (verdict, reason, row["id"]),
     )
+    # 回写本任务待结案的复议履历（复议回队后的重新仲裁结论）
+    conn.execute(
+        """
+        UPDATE reviews
+        SET new_verdict=%s, new_reason=%s, concluded_at=%s
+        WHERE job_id=%s AND concluded_at IS NULL
+        """,
+        (verdict, reason, datetime.now(timezone.utc), row["id"]),
+    )
     conn.commit()
     return row["id"]
 
