@@ -28,6 +28,16 @@ CREATE TABLE IF NOT EXISTS jobs (
     verdict text NOT NULL DEFAULT '',
     reason text NOT NULL DEFAULT '',
     created_by text NOT NULL,
+    created_at timestamptz NOT NULL,
+    reconsider_count integer NOT NULL DEFAULT 0
+);
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS reconsider_count integer NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS reconsiderations (
+    id serial PRIMARY KEY,
+    job_id integer NOT NULL REFERENCES jobs(id),
+    reason text NOT NULL,
+    created_by text NOT NULL,
+    count_after integer NOT NULL,
     created_at timestamptz NOT NULL
 );
 """
@@ -46,6 +56,10 @@ class JobIn(BaseModel):
     lamp: str
     nominal_nm: float
     measured_nm: float
+
+
+class ReconsiderIn(BaseModel):
+    reason: str
 
 
 def user_from_request(request: Request) -> dict:
@@ -88,7 +102,7 @@ async def list_jobs(request: Request) -> list:
     user_from_request(request)
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, lamp, nominal_nm, measured_nm, status, verdict, reason, created_by FROM jobs ORDER BY id DESC"
+            "SELECT id, lamp, nominal_nm, measured_nm, status, verdict, reason, created_by, reconsider_count FROM jobs ORDER BY id DESC"
         ).fetchall()
         return list(rows)
 
@@ -98,7 +112,7 @@ async def get_job(request: Request, job_id: int) -> dict:
     user_from_request(request)
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, lamp, nominal_nm, measured_nm, status, verdict, reason, created_by FROM jobs WHERE id = %s",
+            "SELECT id, lamp, nominal_nm, measured_nm, status, verdict, reason, created_by, reconsider_count FROM jobs WHERE id = %s",
             (job_id,),
         ).fetchone()
         if not row:
@@ -123,6 +137,57 @@ async def create_job(request: Request, data: JobIn) -> dict:
         return {"id": row["id"], "status": "pending"}
 
 
+@post("/api/jobs/{job_id:int}/reconsider")
+async def reconsider_job(request: Request, job_id: int, data: ReconsiderIn) -> dict:
+    user = user_from_request(request)
+    if user["role"] != "reader":
+        raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="仅巡检可复议，校准员不可复议")
+    reason = data.reason.strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="请填写复议理由")
+    with connect() as conn:
+        row = conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        updated = conn.execute(
+            """
+            UPDATE jobs
+            SET status='pending', verdict='', reason='', reconsider_count=reconsider_count+1
+            WHERE id=%s AND status='done'
+            RETURNING reconsider_count
+            """,
+            (job_id,),
+        ).fetchone()
+        if not updated:
+            raise HTTPException(status_code=409, detail="仅已结案任务可复议")
+        count = updated["reconsider_count"]
+        conn.execute(
+            """
+            INSERT INTO reconsiderations(job_id, reason, created_by, count_after, created_at)
+            VALUES (%s,%s,%s,%s,%s)
+            """,
+            (job_id, reason, user["username"], count, datetime.now(timezone.utc)),
+        )
+        conn.commit()
+        return {"id": job_id, "status": "pending", "reconsider_count": count}
+
+
+@get("/api/reconsiderations")
+async def list_reconsiderations(request: Request) -> list:
+    user_from_request(request)
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.id, r.job_id, j.lamp, r.reason, r.created_by, r.count_after,
+                   to_char(r.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
+            FROM reconsiderations r
+            JOIN jobs j ON j.id = r.job_id
+            ORDER BY r.id DESC
+            """
+        ).fetchall()
+        return list(rows)
+
+
 def on_startup() -> None:
     with connect() as conn:
         conn.execute(SCHEMA)
@@ -141,4 +206,7 @@ def on_startup() -> None:
         conn.commit()
 
 
-app = Litestar(route_handlers=[health, login, list_jobs, get_job, create_job], on_startup=[on_startup])
+app = Litestar(
+    route_handlers=[health, login, list_jobs, get_job, create_job, reconsider_job, list_reconsiderations],
+    on_startup=[on_startup],
+)
